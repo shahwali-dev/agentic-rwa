@@ -1,0 +1,23 @@
+{
+  "name": "rwa-token-client",
+  "version": "1.0.0",
+  "description": "RWA Token x402 Payment Client",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "casper-js-sdk": "^2.14.0",
+    "dotenv": "^17.4.2",
+    "ethers": "^6.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.3.0"
+  }
+}
