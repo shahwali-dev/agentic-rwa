@@ -441,13 +441,3 @@ mod tests {
         );
     }
 }
-
-// ============================================
-// Panic Handler for WASM
-// ============================================
-
-#[cfg(target_arch = "wasm32")]
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
-}

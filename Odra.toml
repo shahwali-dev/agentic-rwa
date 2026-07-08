@@ -1,2 +1,6 @@
+[name]
+name = "agentic_rwa"
+
 [[contracts]]
+name = "RWAToken"
 fqn = "agentic_rwa::RWAToken"
