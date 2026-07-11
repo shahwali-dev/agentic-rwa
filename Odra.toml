@@ -1,6 +1,23 @@
 [name]
+
 name = "agentic_rwa"
 
+version = "0.1.0"
+
+authors = ["Shah Wali"]
+
+
+
 [[contracts]]
+
 name = "RWAToken"
+
 fqn = "agentic_rwa::RWAToken"
+
+build_args = ["--no-default-features", "--features", "casper"]
+
+
+
+[dependencies]
+
+odra = { version = "2.8.2", features = ["casper"] }
