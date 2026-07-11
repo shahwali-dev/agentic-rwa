@@ -1,84 +1,127 @@
-import { Keys } from 'casper-js-sdk';
+import {
+  buildDomain,
+  CASPER_DOMAIN_TYPES,
+  hashTypedData,
+  TransferAuthorizationTypes,
+} from "@casper-ecosystem/casper-eip-712";
 
-export interface EIP712Domain {
-  name: string;
-  version: string;
-  network: string;
-  tokenContractHash: string;
+import {
+  KeyAlgorithm,
+  PrivateKey,
+} from "casper-js-sdk";
+
+import { readFile } from "fs/promises";
+
+import {
+  EIP712Domain,
+  SignedAuthorization,
+  TransferAuthorization,
+} from "./types";
+
+import {
+  assertAccountHash,
+  assertBytes32,
+  normalizeContractHash,
+  toBigInt,
+} from "./utils";
+
+/**
+ * Loads an ED25519 private key from a PEM file.
+ */
+async function loadPrivateKey(
+  pemPath: string
+): Promise<PrivateKey> {
+  const pem = await readFile(pemPath, "utf8");
+
+  return PrivateKey.fromPem(
+    pem,
+    KeyAlgorithm.ED25519
+  );
 }
 
-export interface TransferAuthorization {
-  from: string;
-  to: string;
-  value: string;
-  validAfter: string;
-  validBefore: string;
-  nonce: string;
-}
-
-function hexToUint8Array(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
-  }
-  return bytes;
-}
-
-export function signTransferAuthorization(
-  privateKeyHex: string,
-  domain: EIP712Domain,
-  authorization: TransferAuthorization
-): string {
-  const privateKeyBytes = hexToUint8Array(privateKeyHex);
-  
-  const publicKeyBytes = Keys.Ed25519.privateToPublicKey(privateKeyBytes);
-  const keyPair = Keys.Ed25519.parseKeyPair(publicKeyBytes, privateKeyBytes);
-  
-  const messageHash = buildAuthorizationHash(domain, authorization);
-  const signature = keyPair.sign(messageHash);
-  return Buffer.from(signature).toString('hex');
-}
-
-function buildAuthorizationHash(
-  domain: EIP712Domain,
-  authorization: TransferAuthorization
-): Uint8Array {
-  const encoder = new TextEncoder();
-  
-  const parts = [
+/**
+ * Builds the Casper-native EIP-712 domain.
+ */
+function createDomain(domain: EIP712Domain) {
+  return buildDomain(
     domain.name,
     domain.version,
     domain.network,
-    domain.tokenContractHash,
-    authorization.from,
-    authorization.to,
-    authorization.value,
-    authorization.validAfter,
-    authorization.validBefore,
-    authorization.nonce
-  ];
-  
-  const encodedParts = parts.map(p => encoder.encode(p));
-  
-  let totalLength = 0;
-  encodedParts.forEach(p => totalLength += p.length);
-  
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  encodedParts.forEach(p => {
-    result.set(p, offset);
-    offset += p.length;
-  });
-  
-  return result.slice(0, 32);
+    normalizeContractHash(domain.tokenContractHash)
+  );
 }
 
-export function generateNonce(): string {
-  const nonce = new Uint8Array(32);
-  crypto.getRandomValues(nonce);
-  return Buffer.from(nonce).toString('hex');
+/**
+ * Converts our application model into the
+ * exact message expected by the EIP-712 library.
+ */
+function createMessage(
+  authorization: TransferAuthorization
+) {
+  assertAccountHash(authorization.from);
+  assertAccountHash(authorization.to);
+  assertBytes32(authorization.nonce);
+
+  return {
+    from: authorization.from,
+    to: authorization.to,
+    value: toBigInt(authorization.value),
+    valid_after: toBigInt(
+      authorization.validAfter
+    ),
+    valid_before: toBigInt(
+      authorization.validBefore
+    ),
+    nonce: authorization.nonce,
+  };
 }
 
-export function privateKeyToHex(privateKey: Uint8Array): string {
-  return Buffer.from(privateKey).toString('hex');
+/**
+ * Builds the EIP-712 digest.
+ */
+export function buildTransferDigest(
+  domain: EIP712Domain,
+  authorization: TransferAuthorization
+): Uint8Array {
+  return hashTypedData(
+    createDomain(domain),
+    TransferAuthorizationTypes,
+    "TransferAuthorization",
+    createMessage(authorization),
+    {
+      domainTypes: CASPER_DOMAIN_TYPES,
+    }
+  );
+}
+
+/**
+ * Signs a TransferAuthorization using
+ * an ED25519 Casper private key.
+ */
+export async function signTransferAuthorization(
+  pemPath: string,
+  domain: EIP712Domain,
+  authorization: TransferAuthorization
+): Promise<SignedAuthorization> {
+  const privateKey = await loadPrivateKey(
+    pemPath
+  );
+
+  const digest = buildTransferDigest(
+    domain,
+    authorization
+  );
+
+  const signature =
+    await privateKey.signAndAddAlgorithmBytes(
+      digest
+    );
+
+  return {
+    authorization,
+    signature: Buffer.from(signature).toString(
+      "hex"
+    ),
+    publicKey: privateKey.publicKey.toHex(),
+  };
 }

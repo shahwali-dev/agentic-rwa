@@ -1,189 +1,255 @@
-import axios from 'axios';
-import { Keys } from 'casper-js-sdk';
-import { 
-  signTransferAuthorization, 
-  generateNonce, 
-  TransferAuthorization, 
-  EIP712Domain
-} from './eip712-signer';
+import axios, { AxiosError, AxiosInstance, AxiosRequestConfig } from "axios";
+import { signTransferAuthorization } from "./eip712-signer";
+import { config } from "./config";
+import {
+  API_ENDPOINTS,
+  AUTHORIZATION_TIMEOUT_SECONDS,
+  DEFAULT_NETWORK,
+  DEFAULT_PAYMENT_SCHEME,
+  DEFAULT_PAYMENT_TIMEOUT_SECONDS,
+  DEFAULT_TOKEN_DECIMALS,
+  DEFAULT_TOKEN_SYMBOL,
+  DEFAULT_TOKEN_VERSION,
+  DOMAIN_NAME,
+  DOMAIN_VERSION,
+  X402_VERSION,
+} from "./constants";
+import {
+  EIP712Domain,
+  PaymentPayload,
+  PaymentRequest,
+  PaymentRequirements,
+  SettlementResponse,
+  SignedAuthorization,
+  TransferAuthorization,
+  VerifyResponse,
+} from "./types";
+import {
+  generateNonce,
+  getAuthorizationWindow,
+  normalizeAccountHash,
+  normalizeContractHash,
+} from "./utils";
 
-function hexToUint8Array(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+/* ============================================================================
+ * Error Classes
+ * ========================================================================== */
+
+export class X402ClientError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "X402ClientError";
   }
-  return bytes;
 }
 
-export interface PaymentPayload {
-  x402Version: number;
-  resource: {
-    url: string;
-    description?: string;
-  };
-  accepted: {
-    scheme: string;
-    network: string;
-    asset: string;
-    amount: string;
-    payTo: string;
-    maxTimeoutSeconds: number;
-  };
-  payload: {
-    signature: string;
-    publicKey: string;
-    authorization: TransferAuthorization;
-  };
+export class HttpError extends X402ClientError {
+  constructor(message: string) {
+    super(message);
+    this.name = "HttpError";
+  }
 }
 
-export interface PaymentRequirements {
-  scheme: string;
-  network: string;
-  payTo: string;
-  amount: string;
-  asset: string;
-  maxTimeoutSeconds: number;
-  extra: {
-    name: string;
-    version: string;
-    decimals: string;
-    symbol: string;
-  };
+export class VerificationError extends X402ClientError {
+  constructor(message: string) {
+    super(message);
+    this.name = "VerificationError";
+  }
 }
+
+export class SettlementError extends X402ClientError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SettlementError";
+  }
+}
+
+/* ============================================================================
+ * Retry Helper
+ * ========================================================================== */
+
+async function retry<T>(operation: () => Promise<T>, attempts = 3, delayMs = 1000): Promise<T> {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (i === attempts - 1) break;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
+
+/* ============================================================================
+ * X402 Client
+ * ========================================================================== */
 
 export class X402Client {
-  private facilitatorUrl: string = 'https://x402-facilitator.cspr.cloud';
-  private apiKey: string;
+  private readonly http: AxiosInstance;
 
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
+  constructor() {
+    this.http = axios.create({
+      baseURL: config.client.facilitatorBaseUrl,
+      timeout: 30000,
+      headers: {
+        Authorization: config.client.apiKey,
+        "Content-Type": "application/json",
+      },
+    });
   }
 
-  async makePayment(
-    payerPrivateKeyHex: string,
-    payerAddress: string,
-    recipientAddress: string,
-    tokenContractHash: string,
-    amount: string,
-    resourceUrl: string
-  ): Promise<string | null> {
-    const nonce = generateNonce();
-    const validAfter = Math.floor(Date.now() / 1000);
-    const validBefore = validAfter + 300;
+  private log(message: string, data?: unknown): void {
+    console.log(`[x402] ${message}`);
+    if (data !== undefined) console.dir(data, { depth: null });
+  }
 
-    // Clean both addresses to match formats globally across authorization and requirements
-    const cleanPayer = payerAddress.replace('account-hash-', '');
-    const cleanRecipient = recipientAddress.replace('account-hash-', '');
+  private async post<T>(endpoint: string, body: unknown, options?: AxiosRequestConfig): Promise<T> {
+    try {
+      const response = await this.http.post<T>(endpoint, body, options);
+      return response.data;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new HttpError(this.formatAxiosError(error));
+      }
+      throw error;
+    }
+  }
 
-    const authorization: TransferAuthorization = {
-      from: cleanPayer,
-      to: cleanRecipient,
+  private formatAxiosError(error: AxiosError): string {
+    if (error.response) return `HTTP ${error.response.status} : ${JSON.stringify(error.response.data)}`;
+    if (error.request) return "No response received from facilitator.";
+    return error.message;
+  }
+
+  private buildDomain(tokenContractHash: string): EIP712Domain {
+    return {
+      name: DOMAIN_NAME,
+      version: DOMAIN_VERSION,
+      network: DEFAULT_NETWORK,
+      tokenContractHash: normalizeContractHash(tokenContractHash),
+    };
+  }
+
+  private buildAuthorization(
+    payer: string,
+    recipient: string,
+    amount: string
+  ): TransferAuthorization {
+    const window = getAuthorizationWindow(
+      AUTHORIZATION_TIMEOUT_SECONDS
+    );
+
+    return {
+      from: normalizeAccountHash(payer),
+
+      to: this.formatPayTo(recipient),
+
       value: amount,
-      validAfter: validAfter.toString(),
-      validBefore: validBefore.toString(),
-      nonce: nonce,
+      validAfter: window.validAfter.toString(),
+      validBefore: window.validBefore.toString(),
+      nonce: generateNonce(),
     };
+  }
 
-    const privateKeyBytes = hexToUint8Array(payerPrivateKeyHex);
-    const publicKeyBytes = Keys.Ed25519.privateToPublicKey(privateKeyBytes);
-    const keyPair = Keys.Ed25519.parseKeyPair(publicKeyBytes, privateKeyBytes);
-    const publicKey = keyPair.publicKey.toHex();
+  private async signAuthorization(pemPath: string, domain: EIP712Domain, authorization: TransferAuthorization): Promise<SignedAuthorization> {
+    return signTransferAuthorization(pemPath, domain, authorization);
+  }
 
-    const domain: EIP712Domain = {
-      name: 'Cep18x402',
-      version: '1',
-      network: 'casper:casper-test',
-      tokenContractHash: tokenContractHash,
-    };
+  /**
+ * Formats payTo exactly as expected by the facilitator.
+ */
+  private formatPayTo(recipient: string): string {
+    const normalized = normalizeAccountHash(recipient);
+    return `account-hash-${normalized}`;
+  }
 
-    const signature = signTransferAuthorization(payerPrivateKeyHex, domain, authorization);
+  private buildPaymentPayload(
+    signed: SignedAuthorization,
+    resourceUrl: string,
+    recipient: string,
+    tokenContractHash: string,
+    amount: string
+  ): PaymentPayload {
+    return {
+      x402Version: X402_VERSION,
 
-    const payload: PaymentPayload = {
-      x402Version: 2,
       resource: {
         url: resourceUrl,
-        description: 'RWA Token Transfer',
+        description: "RWA Token Transfer",
       },
+
       accepted: {
-        scheme: 'exact',
-        network: 'casper:casper-test',
-        asset: tokenContractHash,
-        amount: amount,
-        payTo: cleanRecipient, // Kept clean to match authorization.to format
-        maxTimeoutSeconds: 300,
+        scheme: DEFAULT_PAYMENT_SCHEME,
+        network: DEFAULT_NETWORK,
+        asset: normalizeContractHash(tokenContractHash),
+        amount,
+        payTo: this.formatPayTo(recipient),
+        maxTimeoutSeconds: DEFAULT_PAYMENT_TIMEOUT_SECONDS,
       },
-      payload: {
-        signature: signature,
-        publicKey: publicKey,
-        authorization: authorization,
-      },
-    };
 
-    const requirements: PaymentRequirements = {
-      scheme: 'exact',
-      network: 'casper:casper-test',
-      payTo: cleanRecipient, // Kept clean to match authorization.to format
-      amount: amount,
-      asset: tokenContractHash,
-      maxTimeoutSeconds: 900,
+      payload: signed,
+    };
+  }
+
+  private buildPaymentRequirements(
+    recipient: string,
+    tokenContractHash: string,
+    amount: string
+  ): PaymentRequirements {
+    return {
+      scheme: DEFAULT_PAYMENT_SCHEME,
+      network: DEFAULT_NETWORK,
+      asset: normalizeContractHash(tokenContractHash),
+      amount,
+      payTo: this.formatPayTo(recipient),
+      maxTimeoutSeconds: DEFAULT_PAYMENT_TIMEOUT_SECONDS,
+
       extra: {
-        name: 'Cep18x402',
-        version: '1',
-        decimals: '0',
-        symbol: 'RWA',
+        name: DOMAIN_NAME,
+        version: DOMAIN_VERSION,
+        symbol: DEFAULT_TOKEN_SYMBOL,
+        decimals: DEFAULT_TOKEN_DECIMALS,
       },
     };
+  }
 
-    const isVerified = await this.verify(payload, requirements);
-    if (!isVerified) {
-      console.error('Payment verification failed');
-      return null;
-    }
+  public async verify(paymentPayload: PaymentPayload, paymentRequirements: PaymentRequirements): Promise<boolean> {
+    this.log("Running verification...");
+    const response = await retry(() => this.post<VerifyResponse>(API_ENDPOINTS.VERIFY, { paymentPayload, paymentRequirements }));
 
+    console.dir(response, { depth: null });
+
+    if (!response.isValid) throw new VerificationError(response.invalidMessage ?? response.reason ?? response.invalidReason ?? "Facilitator rejected payment.");
+    this.log("Verification successful.");
+    return true;
+  }
+
+  public async settle(paymentPayload: PaymentPayload, paymentRequirements: PaymentRequirements): Promise<string> {
+    this.log("Submitting settlement request.");
+    const response = await retry(() => this.post<SettlementResponse>(API_ENDPOINTS.SETTLE, { paymentPayload, paymentRequirements }));
+    if (!response.success) throw new SettlementError(response.error ?? "Settlement failed.");
+    this.log("Settlement completed successfully.");
+    return response.transaction!;
+  }
+
+  public async makePayment(request: PaymentRequest): Promise<string> {
+    const authorization = this.buildAuthorization(request.payerAccountHash, request.recipientAccountHash, request.amount);
+    const domain = this.buildDomain(request.tokenContractHash);
+    const signed = await this.signAuthorization(request.payerPemPath, domain, authorization);
+    const payload = this.buildPaymentPayload(signed, request.resourceUrl, request.recipientAccountHash, request.tokenContractHash, request.amount);
+    const requirements = this.buildPaymentRequirements(request.recipientAccountHash, request.tokenContractHash, request.amount);
+
+    console.log("Authorization:");
+    console.dir(authorization, { depth: null });
+
+    console.log("Payment Payload:");
+    console.dir(payload, { depth: null });
+
+    console.log("Payment Requirements:");
+    console.dir(requirements, { depth: null });
+
+    await this.verify(payload, requirements);
     return await this.settle(payload, requirements);
-  }
-
-  async verify(payload: PaymentPayload, requirements: PaymentRequirements): Promise<boolean> {
-    try {
-      const response = await axios.post(
-        `${this.facilitatorUrl}/verify`,
-        { paymentPayload: payload, paymentRequirements: requirements },
-        { headers: { 'Authorization': this.apiKey, 'Content-Type': 'application/json' } }
-      );
-
-      const result = response.data;
-      if (result.isValid) {
-        console.log('✅ Payment verified! Payer:', result.payer);
-        return true;
-      } else {
-        console.error('❌ Verification failed:', result.invalidMessage);
-        return false;
-      }
-    } catch (error) {
-      console.error('Verification error:', error);
-      return false;
-    }
-  }
-
-  async settle(payload: PaymentPayload, requirements: PaymentRequirements): Promise<string | null> {
-    try {
-      const response = await axios.post(
-        `${this.facilitatorUrl}/settle`,
-        { paymentPayload: payload, paymentRequirements: requirements },
-        { headers: { 'Authorization': this.apiKey, 'Content-Type': 'application/json' } }
-      );
-
-      const result = response.data;
-      if (result.success) {
-        console.log('✅ Payment settled! Transaction:', result.transaction);
-        return result.transaction;
-      } else {
-        console.error('❌ Settlement failed:', result.errorMessage);
-        return null;
-      }
-    } catch (error) {
-      console.error('Settlement error:', error);
-      return null;
-    }
   }
 }
