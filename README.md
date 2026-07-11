@@ -24,24 +24,33 @@ This platform is architected from the ground up to support the tokenization of h
 ```text
 .
 ├── .cargo/
-│   └── config.toml          # Production build rustflags optimization matrices
+│   └── config.toml               # Rust compiler optimization settings
 ├── bin/
-│   ├── build_contract.rs    # Bare-metal WASM compilation entrypoint
-│   ├── build_schema.rs      # Automated contract schema blueprint generation
-│   ├── cli.rs               # Fully structured CLI runtime engine for deployment workflows
-│   └── deploy.rs            # Live Casper Testnet infrastructure launch pipeline
-├── client/                  # Off-chain TypeScript agentic interaction engine
+│   ├── build_contract.rs         # WASM contract build entrypoint
+│   ├── build_schema.rs           # Contract schema generator
+│   ├── cli.rs                    # Deployment CLI
+│   └── deploy.rs                 # Casper Testnet deployment pipeline
+├── client/
 │   ├── src/
-│   │   ├── eip712-signer.ts
-│   │   ├── x402-client.ts
-│   │   └── index.ts
-│   └── package.json         # Node infrastructure configuration layer
+│   │   ├── config.ts             # Client configuration
+│   │   ├── constants.ts          # Shared project constants
+│   │   ├── eip712-signer.ts      # Casper EIP-712 signing engine
+│   │   ├── index.ts              # Client entrypoint
+│   │   ├── types.ts              # Shared TypeScript types
+│   │   ├── utils.ts              # Utility helpers
+│   │   └── x402-client.ts        # x402 payment workflow implementation
+│   ├── package.json              # Node.js client dependencies
+│   └── package-lock.json
 ├── src/
-│   ├── lib.rs               # Hardened RWA Core token implementation (transfer_with_authorization)
-│   └── flipper.rs           # Proxy storage host execution module
-├── .env                     # Local node addresses and path secrets mapping
-├── build.rs                 # Odra build orchestration matrix
-└── Cargo.toml               # Absolute Workspace & Casper Engine dependencies declaration
+│   ├── flipper.rs                # Contract storage host module
+│   └── lib.rs                    # RWA token smart contract (CEP-18 + x402 authorization)
+├── tests/                        # Smart contract integration tests
+├── wasm/                         # Compiled WASM artifacts
+├── build.rs                      # Odra build orchestration
+├── Cargo.toml                    # Rust workspace configuration
+├── Cargo.lock
+├── LICENSE
+└── README.md
 ```
 
 ---
